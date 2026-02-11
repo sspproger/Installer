@@ -14,14 +14,10 @@
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(linker, "/SUBSYSTEM:WINDOWS /ENTRY:WinMainCRTStartup")
 
-// Идентификаторы ресурсов
-//#define IDI_ICON1 101
 #define IDI_APP_ICON 101
 
-// Идентификаторы сообщений
 #define MSG_INSTALLATION_COMPLETE (WM_USER + 1)
 
-// Идентификаторы кнопок
 #define BTN_NEXT 101
 #define BTN_PREV 102
 #define BTN_ACCEPT 103
@@ -30,15 +26,13 @@
 #define BTN_LICENSE_7ZIP 106
 #define BTN_LICENSE_XNVIEW 107
 
-// Константы интерфейса
 constexpr int WINDOW_WIDTH = 650;
-constexpr int WINDOW_HEIGHT = 380;  // Увеличена высота окна
+constexpr int WINDOW_HEIGHT = 380;  
 constexpr int MARGIN = 20;
 constexpr int BUTTON_WIDTH = 100;
 constexpr int BUTTON_HEIGHT = 30;
 constexpr int PROGRESS_BAR_WIDTH = 450;
 
-// Класс для управления приложением
 class AppManager {
 private:
     std::wstring m_name;
@@ -79,12 +73,10 @@ public:
     bool install(const std::wstring& downloadsPath) {
         std::wstring tempPath = downloadsPath + L"\\" + m_name + L"_installer.exe";
 
-        // Скачиваем установщик
         if (!downloadInstaller(downloadsPath)) {
             return false;
         }
 
-        // Устанавливаем приложение
         SHELLEXECUTEINFO sei = { sizeof(sei) };
         sei.lpVerb = L"runas";
         sei.lpFile = tempPath.c_str();
@@ -107,17 +99,14 @@ public:
         GetExitCodeProcess(sei.hProcess, &exitCode);
         CloseHandle(sei.hProcess);
 
-        // Удаляем временный файл
         DeleteFile(tempPath.c_str());
 
-        // Проверяем успешность установки
         bool success = (exitCode == ERROR_SUCCESS) ||
             (exitCode == ERROR_SUCCESS_REBOOT_REQUIRED) ||
             (exitCode == 0);
 
-        // Проверяем статус установки
         if (success) {
-            Sleep(1000); // Даем время системе обновить реестр
+            Sleep(1000); 
             checkInstallationStatus();
         }
 
@@ -127,17 +116,14 @@ public:
 private:
     static bool IsAppInstalled(const std::wstring& registryKey) {
         HKEY hKey;
-        // Проверяем в 32-битном реестре
         if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, registryKey.c_str(), 0, KEY_READ | KEY_WOW64_32KEY, &hKey) == ERROR_SUCCESS) {
             RegCloseKey(hKey);
             return true;
         }
-        // Проверяем в 64-битном реестре
         if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, registryKey.c_str(), 0, KEY_READ | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
             RegCloseKey(hKey);
             return true;
         }
-        // Проверяем в реестре текущего пользователя
         if (RegOpenKeyEx(HKEY_CURRENT_USER, registryKey.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
             RegCloseKey(hKey);
             return true;
@@ -146,7 +132,6 @@ private:
     }
 };
 
-// Класс для управления UI
 class InstallerUI {
 private:
     HWND m_hWnd;
@@ -201,18 +186,15 @@ public:
             return;
         }
 
-        // Название приложения
         std::wstring title = m_apps[appIndex].getName() + L"\n\n";
         createStaticText(MARGIN, MARGIN, getClientWidth() - 2 * MARGIN, 120,
             (title + m_apps[appIndex].getDescription()).c_str());
 
-        // Гиперссылка на лицензионное соглашение
         int linkWidth = 180;
         int linkY = getClientHeight() - 100;
         createHyperlink(getCenterX(linkWidth), linkY, linkWidth, 20, 
             L"Лицензионное соглашение", BTN_LICENSE_7ZIP + appIndex);
 
-        // Кнопки принятия/отклонения
         int buttonsY = getClientHeight() - 60;
         createButton(getLeftButtonX(), buttonsY, BUTTON_WIDTH, BUTTON_HEIGHT, L"Принять", BTN_ACCEPT);
         createButton(getRightButtonX(), buttonsY, BUTTON_WIDTH, BUTTON_HEIGHT, L"Отклонить", BTN_DECLINE);
@@ -240,7 +222,6 @@ public:
         for (const auto& app : m_apps) {
             bool isInstalledNow = false;
 
-            // Даем системе время на обновление информации
             for (int i = 0; i < 5; i++) {
                 AppManager tempApp = app;
                 tempApp.checkInstallationStatus();
@@ -311,7 +292,6 @@ public:
     }
 
 private:
-    // Методы для позиционирования элементов
     int getClientWidth() const {
         RECT rcClient;
         if (m_hWnd && GetClientRect(m_hWnd, &rcClient)) {
@@ -360,14 +340,11 @@ private:
         wc.style = CS_HREDRAW | CS_VREDRAW;
         wc.lpfnWndProc = InstallerUI::staticWndProc;
         wc.hInstance = hInstance;
-        // Загрузка иконки из ресурсов
         wc.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_APP_ICON));
         if (!wc.hIcon) {
-            // Если в ресурсах нет, пробуем из файла
             wc.hIcon = (HICON)LoadImage(NULL, L"installer.ico", IMAGE_ICON,
                 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE);
             if (!wc.hIcon) {
-                // Если файла нет, используем системную иконку
                 wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
             }
         }
@@ -376,7 +353,6 @@ private:
         wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
         wc.lpszClassName = L"InstallerWindowClass";
 
-        // Маленькая иконка
         wc.hIconSm = (HICON)LoadImage(NULL, L"app.ico", IMAGE_ICON,
             16, 16, LR_LOADFROMFILE);
         if (!wc.hIconSm) {
@@ -385,7 +361,6 @@ private:
 
         RegisterClassEx(&wc);
 
-        // Рассчитываем размер окна с учетом заголовка
         RECT rcWindow = { 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT };
         AdjustWindowRect(&rcWindow, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE);
         int windowWidth = rcWindow.right - rcWindow.left;
@@ -455,7 +430,6 @@ private:
             int totalApps = 0;
             int completedApps = 0;
 
-            // Считаем приложения для установки
             for (const auto& app : m_apps) {
                 if (app.isAccepted() && !app.isInstalled()) {
                     totalApps++;
@@ -467,21 +441,17 @@ private:
                 return;
             }
 
-            // Устанавливаем прогресс-бар
             SendMessage(m_hProgress, PBM_SETRANGE32, 0, totalApps * 100);
 
-            // Устанавливаем приложения
             for (auto& app : m_apps) {
                 if (app.isAccepted() && !app.isInstalled()) {
                     int currentProgress = completedApps * 100;
 
-                    // Показываем текущий прогресс
                     for (int i = 0; i < 100; i += 10) {
                         SendMessage(m_hProgress, PBM_SETPOS, currentProgress + i, 0);
                         Sleep(50);
                     }
 
-                    // Устанавливаем приложение
                     if (app.install(m_downloadsPath)) {
                         completedApps++;
                         SendMessage(m_hProgress, PBM_SETPOS, completedApps * 100, 0);
@@ -546,7 +516,6 @@ private:
     }
 };
 
-// Вспомогательные функции
 std::wstring getDownloadsPath() {
     PWSTR path = nullptr;
     std::wstring downloadsPath;
@@ -582,23 +551,18 @@ std::vector<AppManager> createAppList(const std::wstring& downloadsPath) {
             L"/VERYSILENT",
             L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\XnViewMP_is1"
         )
-        // Новые приложения можно легко добавить здесь
     };
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
-    // Проверяем аргументы командной строки
     bool silentMode = (strstr(lpCmdLine, "/S") != nullptr ||
         strstr(lpCmdLine, "/verysilent") != nullptr ||
         strstr(lpCmdLine, "/silent") != nullptr);
 
-    // Получаем путь к папке загрузок
     std::wstring downloadsPath = getDownloadsPath();
 
-    // Создаем список приложений
     std::vector<AppManager> apps = createAppList(downloadsPath);
 
-    // Если режим тихой установки
     if (silentMode) {
         for (auto& app : apps) {
             if (!app.isInstalled()) {
@@ -608,17 +572,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         return 0;
     }
 
-    // Создаем UI и запускаем приложение
     InstallerUI installer(hInstance, apps, downloadsPath, silentMode);
 
     if (!installer.getWindowHandle()) {
         return 1;
     }
 
-    // Показываем стартовую страницу
     installer.showWelcomePage();
 
-    // Запускаем цикл сообщений
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);

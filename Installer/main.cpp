@@ -1,410 +1,629 @@
-#include <windows.h>
+﻿#include <windows.h>
 #include <commctrl.h>
 #include <shlobj.h>
 #include <string>
 #include <vector>
 #include <fstream>
 #include <urlmon.h>
+#include <memory>
+#include <functional>
+#include <thread>
 
 #pragma comment(lib, "urlmon.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(linker, "/SUBSYSTEM:WINDOWS /ENTRY:WinMainCRTStartup")
 
-#define IDI_ICON1 101
+// Идентификаторы ресурсов
+//#define IDI_ICON1 101
+#define IDI_APP_ICON 101
 
-struct AppInfo {
-	std::wstring name;
-	std::wstring description;
-	std::wstring licenseUrl;
-	std::wstring downloadUrl;
-	std::wstring installArgs;
-	std::wstring registryKey;
-	bool accepted;
-	bool installed;
+// Идентификаторы сообщений
+#define MSG_INSTALLATION_COMPLETE (WM_USER + 1)
+
+// Идентификаторы кнопок
+#define BTN_NEXT 101
+#define BTN_PREV 102
+#define BTN_ACCEPT 103
+#define BTN_DECLINE 104
+#define BTN_FINISH 105
+#define BTN_LICENSE_7ZIP 106
+#define BTN_LICENSE_XNVIEW 107
+
+// Константы интерфейса
+constexpr int WINDOW_WIDTH = 650;
+constexpr int WINDOW_HEIGHT = 380;  // Увеличена высота окна
+constexpr int MARGIN = 20;
+constexpr int BUTTON_WIDTH = 100;
+constexpr int BUTTON_HEIGHT = 30;
+constexpr int PROGRESS_BAR_WIDTH = 450;
+
+// Класс для управления приложением
+class AppManager {
+private:
+    std::wstring m_name;
+    std::wstring m_description;
+    std::wstring m_licenseUrl;
+    std::wstring m_downloadUrl;
+    std::wstring m_installArgs;
+    std::wstring m_registryKey;
+    bool m_accepted;
+    bool m_installed;
+
+public:
+    AppManager(const std::wstring& name, const std::wstring& description,
+        const std::wstring& licenseUrl, const std::wstring& downloadUrl,
+        const std::wstring& installArgs, const std::wstring& registryKey)
+        : m_name(name), m_description(description), m_licenseUrl(licenseUrl),
+        m_downloadUrl(downloadUrl), m_installArgs(installArgs), m_registryKey(registryKey),
+        m_accepted(false), m_installed(false) {
+        checkInstallationStatus();
+    }
+
+    void checkInstallationStatus() {
+        m_installed = IsAppInstalled(m_registryKey);
+    }
+
+    bool isInstalled() const { return m_installed; }
+    bool isAccepted() const { return m_accepted; }
+    void setAccepted(bool accepted) { m_accepted = accepted; }
+    const std::wstring& getName() const { return m_name; }
+    const std::wstring& getDescription() const { return m_description; }
+    const std::wstring& getLicenseUrl() const { return m_licenseUrl; }
+
+    bool downloadInstaller(const std::wstring& downloadsPath) {
+        std::wstring tempPath = downloadsPath + L"\\" + m_name + L"_installer.exe";
+        return URLDownloadToFile(NULL, m_downloadUrl.c_str(), tempPath.c_str(), 0, NULL) == S_OK;
+    }
+
+    bool install(const std::wstring& downloadsPath) {
+        std::wstring tempPath = downloadsPath + L"\\" + m_name + L"_installer.exe";
+
+        // Скачиваем установщик
+        if (!downloadInstaller(downloadsPath)) {
+            return false;
+        }
+
+        // Устанавливаем приложение
+        SHELLEXECUTEINFO sei = { sizeof(sei) };
+        sei.lpVerb = L"runas";
+        sei.lpFile = tempPath.c_str();
+        sei.lpParameters = m_installArgs.c_str();
+        sei.nShow = SW_HIDE;
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+
+        if (!ShellExecuteEx(&sei)) {
+            DWORD err = GetLastError();
+            DeleteFile(tempPath.c_str());
+            if (err == ERROR_CANCELLED) {
+                return false;
+            }
+            return false;
+        }
+
+        WaitForSingleObject(sei.hProcess, INFINITE);
+
+        DWORD exitCode;
+        GetExitCodeProcess(sei.hProcess, &exitCode);
+        CloseHandle(sei.hProcess);
+
+        // Удаляем временный файл
+        DeleteFile(tempPath.c_str());
+
+        // Проверяем успешность установки
+        bool success = (exitCode == ERROR_SUCCESS) ||
+            (exitCode == ERROR_SUCCESS_REBOOT_REQUIRED) ||
+            (exitCode == 0);
+
+        // Проверяем статус установки
+        if (success) {
+            Sleep(1000); // Даем время системе обновить реестр
+            checkInstallationStatus();
+        }
+
+        return success;
+    }
+
+private:
+    static bool IsAppInstalled(const std::wstring& registryKey) {
+        HKEY hKey;
+        // Проверяем в 32-битном реестре
+        if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, registryKey.c_str(), 0, KEY_READ | KEY_WOW64_32KEY, &hKey) == ERROR_SUCCESS) {
+            RegCloseKey(hKey);
+            return true;
+        }
+        // Проверяем в 64-битном реестре
+        if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, registryKey.c_str(), 0, KEY_READ | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
+            RegCloseKey(hKey);
+            return true;
+        }
+        // Проверяем в реестре текущего пользователя
+        if (RegOpenKeyEx(HKEY_CURRENT_USER, registryKey.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            RegCloseKey(hKey);
+            return true;
+        }
+        return false;
+    }
 };
 
-struct AppState {
-	HWND hWnd;
-	HWND hProgress;
-	int currentPage;
-	std::vector<AppInfo> apps;
-	bool silentMode;
-	std::wstring downloadsPath;
+// Класс для управления UI
+class InstallerUI {
+private:
+    HWND m_hWnd;
+    HWND m_hProgress;
+    std::vector<AppManager> m_apps;
+    std::wstring m_downloadsPath;
+    bool m_silentMode;
+    int m_currentAppIndex;
+
+public:
+    InstallerUI(HINSTANCE hInstance, const std::vector<AppManager>& apps,
+        const std::wstring& downloadsPath, bool silentMode)
+        : m_hWnd(nullptr), m_hProgress(nullptr), m_apps(apps),
+        m_downloadsPath(downloadsPath), m_silentMode(silentMode), m_currentAppIndex(0) {
+
+        initCommonControls();
+        createWindow(hInstance);
+    }
+
+    ~InstallerUI() {
+        if (m_hWnd) {
+            DestroyWindow(m_hWnd);
+        }
+    }
+
+    HWND getWindowHandle() const { return m_hWnd; }
+
+    void showWelcomePage() {
+        clearWindow();
+        m_currentAppIndex = 0;
+
+        createStaticText(MARGIN, MARGIN, getClientWidth() - 2 * MARGIN, 150,
+            L"Добро пожаловать в установщик приложений.\n\n"
+            L"Этот мастер установит выбранные вами приложения на ваш компьютер.\n"
+            L"Нажмите 'Далее' для продолжения.");
+
+        createButton(getRightButtonX(), getBottomButtonY(),
+            BUTTON_WIDTH, BUTTON_HEIGHT, L"Далее", BTN_NEXT);
+    }
+
+    void showAppSelectionPage(int appIndex) {
+        if (appIndex >= static_cast<int>(m_apps.size())) {
+            startInstallation();
+            return;
+        }
+
+        m_currentAppIndex = appIndex;
+        clearWindow();
+
+        if (m_apps[appIndex].isInstalled()) {
+            showAppSelectionPage(appIndex + 1);
+            return;
+        }
+
+        // Название приложения
+        std::wstring title = m_apps[appIndex].getName() + L"\n\n";
+        createStaticText(MARGIN, MARGIN, getClientWidth() - 2 * MARGIN, 120,
+            (title + m_apps[appIndex].getDescription()).c_str());
+
+        // Гиперссылка на лицензионное соглашение
+        int linkWidth = 180;
+        int linkY = getClientHeight() - 100;
+        createHyperlink(getCenterX(linkWidth), linkY, linkWidth, 20, 
+            L"Лицензионное соглашение", BTN_LICENSE_7ZIP + appIndex);
+
+        // Кнопки принятия/отклонения
+        int buttonsY = getClientHeight() - 60;
+        createButton(getLeftButtonX(), buttonsY, BUTTON_WIDTH, BUTTON_HEIGHT, L"Принять", BTN_ACCEPT);
+        createButton(getRightButtonX(), buttonsY, BUTTON_WIDTH, BUTTON_HEIGHT, L"Отклонить", BTN_DECLINE);
+    }
+
+    void showInstallationProgressPage() {
+        clearWindow();
+
+        createStaticText(getCenterX(PROGRESS_BAR_WIDTH), 50, PROGRESS_BAR_WIDTH, 50,
+            L"Идет установка выбранных приложений...");
+
+        m_hProgress = createProgressBar(getCenterX(PROGRESS_BAR_WIDTH), 120,
+            PROGRESS_BAR_WIDTH, 30);
+        SendMessage(m_hProgress, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
+        SendMessage(m_hProgress, PBM_SETSTEP, 1, 0);
+
+        startInstallationThread();
+    }
+
+    void showResultsPage() {
+        clearWindow();
+
+        std::wstring resultText = L"Результаты установки:\n\n";
+
+        for (const auto& app : m_apps) {
+            bool isInstalledNow = false;
+
+            // Даем системе время на обновление информации
+            for (int i = 0; i < 5; i++) {
+                AppManager tempApp = app;
+                tempApp.checkInstallationStatus();
+                if (tempApp.isInstalled()) {
+                    isInstalledNow = true;
+                    break;
+                }
+                Sleep(200);
+            }
+
+            resultText += app.getName() + L": ";
+            if (app.isAccepted()) {
+                if (isInstalledNow) {
+                    resultText += L"✓ Успешно установлено\n";
+                }
+                else {
+                    resultText += L"✗ Не удалось установить\n";
+                }
+            }
+            else if (app.isInstalled()) {
+                resultText += L"✓ Уже установлено\n";
+            }
+            else {
+                resultText += L"✗ Установка отменена\n";
+            }
+        }
+
+        createStaticText(MARGIN, MARGIN, getClientWidth() - 2 * MARGIN, 
+                        getClientHeight() - 100, resultText.c_str());
+
+        createButton(getCenterX(BUTTON_WIDTH), getBottomButtonY(),
+            BUTTON_WIDTH, BUTTON_HEIGHT, L"Завершить", BTN_FINISH);
+    }
+
+    void handleCommand(int commandId) {
+        if (commandId >= BTN_LICENSE_7ZIP && commandId < BTN_LICENSE_7ZIP + static_cast<int>(m_apps.size())) {
+            int appIndex = commandId - BTN_LICENSE_7ZIP;
+            if (appIndex < static_cast<int>(m_apps.size())) {
+                ShellExecute(NULL, L"open", m_apps[appIndex].getLicenseUrl().c_str(),
+                    NULL, NULL, SW_SHOW);
+            }
+            return;
+        }
+
+        switch (commandId) {
+        case BTN_NEXT:
+            showAppSelectionPage(0);
+            break;
+
+        case BTN_ACCEPT:
+            if (m_currentAppIndex < static_cast<int>(m_apps.size())) {
+                m_apps[m_currentAppIndex].setAccepted(true);
+                showAppSelectionPage(m_currentAppIndex + 1);
+            }
+            break;
+
+        case BTN_DECLINE:
+            if (m_currentAppIndex < static_cast<int>(m_apps.size())) {
+                m_apps[m_currentAppIndex].setAccepted(false);
+                showAppSelectionPage(m_currentAppIndex + 1);
+            }
+            break;
+
+        case BTN_FINISH:
+            PostMessage(m_hWnd, WM_CLOSE, 0, 0);
+            break;
+        }
+    }
+
+private:
+    // Методы для позиционирования элементов
+    int getClientWidth() const {
+        RECT rcClient;
+        if (m_hWnd && GetClientRect(m_hWnd, &rcClient)) {
+            return rcClient.right - rcClient.left;
+        }
+        return WINDOW_WIDTH;
+    }
+
+    int getClientHeight() const {
+        RECT rcClient;
+        if (m_hWnd && GetClientRect(m_hWnd, &rcClient)) {
+            return rcClient.bottom - rcClient.top;
+        }
+        return WINDOW_HEIGHT;
+    }
+
+    int getBottomButtonY() const {
+        return getClientHeight() - MARGIN - BUTTON_HEIGHT;
+    }
+
+    int getLeftButtonX() const {
+        return MARGIN;
+    }
+
+    int getRightButtonX() const {
+        return getClientWidth() - MARGIN - BUTTON_WIDTH;
+    }
+
+    int getCenterX(int elementWidth) const {
+        return (getClientWidth() - elementWidth) / 2;
+    }
+
+    int getCenterY(int elementHeight) const {
+        return (getClientHeight() - elementHeight) / 2;
+    }
+
+    void initCommonControls() {
+        INITCOMMONCONTROLSEX icex;
+        icex.dwSize = sizeof(icex);
+        icex.dwICC = ICC_PROGRESS_CLASS;
+        InitCommonControlsEx(&icex);
+    }
+
+    void createWindow(HINSTANCE hInstance) {
+        WNDCLASSEX wc = { sizeof(WNDCLASSEX) };
+        wc.style = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc = InstallerUI::staticWndProc;
+        wc.hInstance = hInstance;
+        // Загрузка иконки из ресурсов
+        wc.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_APP_ICON));
+        if (!wc.hIcon) {
+            // Если в ресурсах нет, пробуем из файла
+            wc.hIcon = (HICON)LoadImage(NULL, L"installer.ico", IMAGE_ICON,
+                0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE);
+            if (!wc.hIcon) {
+                // Если файла нет, используем системную иконку
+                wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+            }
+        }
+
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = L"InstallerWindowClass";
+
+        // Маленькая иконка
+        wc.hIconSm = (HICON)LoadImage(NULL, L"app.ico", IMAGE_ICON,
+            16, 16, LR_LOADFROMFILE);
+        if (!wc.hIconSm) {
+            wc.hIconSm = LoadIcon(NULL, IDI_APPLICATION);
+        }
+
+        RegisterClassEx(&wc);
+
+        // Рассчитываем размер окна с учетом заголовка
+        RECT rcWindow = { 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT };
+        AdjustWindowRect(&rcWindow, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE);
+        int windowWidth = rcWindow.right - rcWindow.left;
+        int windowHeight = rcWindow.bottom - rcWindow.top;
+
+        m_hWnd = CreateWindowEx(0, wc.lpszClassName, L"Установщик приложений",
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+            CW_USEDEFAULT, CW_USEDEFAULT, windowWidth, windowHeight,
+            NULL, NULL, hInstance, this);
+
+        if (m_hWnd) {
+            ShowWindow(m_hWnd, SW_SHOW);
+            UpdateWindow(m_hWnd);
+        }
+    }
+
+    void clearWindow() {
+        if (!m_hWnd) return;
+
+        HWND hChild = GetWindow(m_hWnd, GW_CHILD);
+        while (hChild) {
+            DestroyWindow(hChild);
+            hChild = GetWindow(m_hWnd, GW_CHILD);
+        }
+        m_hProgress = nullptr;
+    }
+
+    HWND createStaticText(int x, int y, int width, int height, const wchar_t* text) {
+        return CreateWindow(L"STATIC", text,
+            WS_VISIBLE | WS_CHILD,
+            x, y, width, height,
+            m_hWnd, NULL, NULL, NULL);
+    }
+
+    HWND createButton(int x, int y, int width, int height, const wchar_t* text, int id) {
+        return CreateWindow(L"BUTTON", text,
+            WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
+            x, y, width, height,
+            m_hWnd, (HMENU)(UINT_PTR)id, NULL, NULL);
+    }
+
+    HWND createHyperlink(int x, int y, int width, int height, const wchar_t* text, int id) {
+        HWND hLink = CreateWindow(L"STATIC", text,
+            WS_VISIBLE | WS_CHILD | SS_NOTIFY,
+            x, y, width, height,
+            m_hWnd, (HMENU)(UINT_PTR)id, NULL, NULL);
+
+        HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+        LOGFONT lf;
+        GetObject(hFont, sizeof(lf), &lf);
+        lf.lfUnderline = TRUE;
+        HFONT hUnderlinedFont = CreateFontIndirect(&lf);
+        SendMessage(hLink, WM_SETFONT, (WPARAM)hUnderlinedFont, TRUE);
+
+        return hLink;
+    }
+
+    HWND createProgressBar(int x, int y, int width, int height) {
+        return CreateWindowEx(0, PROGRESS_CLASS, NULL,
+            WS_VISIBLE | WS_CHILD | PBS_SMOOTH,
+            x, y, width, height,
+            m_hWnd, NULL, NULL, NULL);
+    }
+
+    void startInstallationThread() {
+        std::thread([this]() {
+            int totalApps = 0;
+            int completedApps = 0;
+
+            // Считаем приложения для установки
+            for (const auto& app : m_apps) {
+                if (app.isAccepted() && !app.isInstalled()) {
+                    totalApps++;
+                }
+            }
+
+            if (totalApps == 0) {
+                PostMessage(m_hWnd, MSG_INSTALLATION_COMPLETE, 0, 0);
+                return;
+            }
+
+            // Устанавливаем прогресс-бар
+            SendMessage(m_hProgress, PBM_SETRANGE32, 0, totalApps * 100);
+
+            // Устанавливаем приложения
+            for (auto& app : m_apps) {
+                if (app.isAccepted() && !app.isInstalled()) {
+                    int currentProgress = completedApps * 100;
+
+                    // Показываем текущий прогресс
+                    for (int i = 0; i < 100; i += 10) {
+                        SendMessage(m_hProgress, PBM_SETPOS, currentProgress + i, 0);
+                        Sleep(50);
+                    }
+
+                    // Устанавливаем приложение
+                    if (app.install(m_downloadsPath)) {
+                        completedApps++;
+                        SendMessage(m_hProgress, PBM_SETPOS, completedApps * 100, 0);
+                    }
+                }
+            }
+
+            PostMessage(m_hWnd, MSG_INSTALLATION_COMPLETE, 0, 0);
+            }).detach();
+    }
+
+    void startInstallation() {
+        if (m_silentMode) {
+            for (auto& app : m_apps) {
+                if (!app.isInstalled()) {
+                    app.install(m_downloadsPath);
+                }
+            }
+        }
+        else {
+            showInstallationProgressPage();
+        }
+    }
+
+    static LRESULT CALLBACK staticWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
+        InstallerUI* pThis = nullptr;
+
+        if (message == WM_CREATE) {
+            CREATESTRUCT* pCreate = reinterpret_cast<CREATESTRUCT*>(lParam);
+            pThis = reinterpret_cast<InstallerUI*>(pCreate->lpCreateParams);
+            SetWindowLongPtr(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(pThis));
+        }
+        else {
+            pThis = reinterpret_cast<InstallerUI*>(GetWindowLongPtr(hWnd, GWLP_USERDATA));
+        }
+
+        if (pThis) {
+            return pThis->instanceWndProc(hWnd, message, wParam, lParam);
+        }
+
+        return DefWindowProc(hWnd, message, wParam, lParam);
+    }
+
+    LRESULT instanceWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
+        switch (message) {
+        case WM_COMMAND:
+            handleCommand(LOWORD(wParam));
+            break;
+
+        case MSG_INSTALLATION_COMPLETE:
+            showResultsPage();
+            break;
+
+        case WM_DESTROY:
+            PostQuitMessage(0);
+            break;
+
+        default:
+            return DefWindowProc(hWnd, message, wParam, lParam);
+        }
+        return 0;
+    }
 };
 
-void ShowPage1(AppState* state);
-void ShowPage2(AppState* state);
-void ShowPage3(AppState* state);
-void ShowPage4(AppState* state);
-void ShowPage5(AppState* state);
-std::wstring GetDownloadsPath();
+// Вспомогательные функции
+std::wstring getDownloadsPath() {
+    PWSTR path = nullptr;
+    std::wstring downloadsPath;
 
-bool IsAppInstalled(const std::wstring& registryKey) {
-	HKEY hKey;
-	if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, registryKey.c_str(), 0, KEY_READ | KEY_WOW64_32KEY, &hKey) == ERROR_SUCCESS) {
-		RegCloseKey(hKey);
-		return true;
-	}
-	if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, registryKey.c_str(), 0, KEY_READ | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
-		RegCloseKey(hKey);
-		return true;
-	}
-	if (RegOpenKeyEx(HKEY_CURRENT_USER, registryKey.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-		RegCloseKey(hKey);
-		return true;
-	}
-	return false;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Downloads, 0, NULL, &path))) {
+        downloadsPath = path;
+        CoTaskMemFree(path);
+    }
+    else {
+        downloadsPath = L"C:\\Users\\Public\\Downloads";
+    }
+
+    return downloadsPath;
 }
 
-HRESULT DownloadFile(const std::wstring& url, const std::wstring& localPath) {
-	return URLDownloadToFile(NULL, url.c_str(), localPath.c_str(), 0, NULL);
-}
-
-bool InstallApp(const std::wstring& installerPath, const std::wstring& args) {
-	SHELLEXECUTEINFO sei = { sizeof(sei) };
-	sei.lpVerb = L"runas";
-	sei.lpFile = installerPath.c_str();
-	sei.lpParameters = args.c_str();
-	sei.nShow = SW_HIDE;
-	sei.fMask = SEE_MASK_NOCLOSEPROCESS;
-
-	if (!ShellExecuteEx(&sei)) {
-		DWORD err = GetLastError();
-		if (err == ERROR_CANCELLED) {
-			return false;
-		}
-	}
-
-	WaitForSingleObject(sei.hProcess, INFINITE);
-
-	DWORD exitCode;
-	GetExitCodeProcess(sei.hProcess, &exitCode);
-	CloseHandle(sei.hProcess);
-
-	return (exitCode == ERROR_SUCCESS) ||
-		(exitCode == ERROR_SUCCESS_REBOOT_REQUIRED) ||
-		(exitCode == 0);
-}
-
-HWND CreateButton(HWND hParent, int x, int y, int width, int height, const wchar_t* text, int id) {
-	return CreateWindow(
-		L"BUTTON", text,
-		WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-		x, y, width, height,
-		hParent, (HMENU)id, NULL, NULL);
-}
-
-HWND CreateStaticText(HWND hParent, int x, int y, int width, int height, const wchar_t* text) {
-	return CreateWindow(
-		L"STATIC", text,
-		WS_VISIBLE | WS_CHILD,
-		x, y, width, height,
-		hParent, NULL, NULL, NULL);
-}
-
-HWND CreateHyperlink(HWND hParent, int x, int y, int width, int height, const wchar_t* text, int id) {
-	HWND hLink = CreateWindow(
-		L"STATIC", text,
-		WS_VISIBLE | WS_CHILD | SS_NOTIFY,
-		x, y, width, height,
-		hParent, (HMENU)id, NULL, NULL);
-
-	HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-	LOGFONT lf;
-	GetObject(hFont, sizeof(lf), &lf);
-	lf.lfUnderline = TRUE;
-	HFONT hUnderlinedFont = CreateFontIndirect(&lf);
-	SendMessage(hLink, WM_SETFONT, (WPARAM)hUnderlinedFont, TRUE);
-
-	return hLink;
-}
-
-HWND CreateProgressBar(HWND hParent, int x, int y, int width, int height) {
-	INITCOMMONCONTROLSEX icex;
-	icex.dwSize = sizeof(icex);
-	icex.dwICC = ICC_PROGRESS_CLASS;
-	InitCommonControlsEx(&icex);
-
-	return CreateWindowEx(
-		0, PROGRESS_CLASS, NULL,
-		WS_VISIBLE | WS_CHILD | PBS_SMOOTH,
-		x, y, width, height,
-		hParent, NULL, NULL, NULL);
-}
-
-void ClearWindow(HWND hWnd) {
-	HWND hChild = GetWindow(hWnd, GW_CHILD);
-	while (hChild) {
-		DestroyWindow(hChild);
-		hChild = GetWindow(hWnd, GW_CHILD);
-	}
-}
-
-void ShowPage1(AppState* state) {
-	state->currentPage = 1;
-	ClearWindow(state->hWnd);
-
-	CreateStaticText(state->hWnd, 20, 20, 550, 100,
-		L"����� ���������� � ���������� ����������.\n\n"
-		L"���� ������ ��������� ��������� ���� ���������� �� ��� ���������.\n"
-		L"������� '�����' ��� �����������.");
-
-	CreateButton(state->hWnd, 470, 140, 100, 30, L"�����", 101);
-}
-
-void ShowPage2(AppState* state) {
-	state->currentPage = 2;
-	ClearWindow(state->hWnd);
-
-	if (state->apps[0].installed) {
-		ShowPage3(state);
-		return;
-	}
-
-	CreateStaticText(state->hWnd, 20, 20, 550, 100, state->apps[0].description.c_str());
-	CreateButton(state->hWnd, 200, 140, 200, 30, L"������������ ����������", 201);
-	CreateButton(state->hWnd, 20, 140, 100, 30, L"�������", 102);
-	CreateButton(state->hWnd, 470, 140, 100, 30, L"���������", 103);
-}
-
-void ShowPage3(AppState* state) {
-	state->currentPage = 3;
-	ClearWindow(state->hWnd);
-
-	if (state->apps[1].installed) {
-		ShowPage4(state);
-		return;
-	}
-
-	CreateStaticText(state->hWnd, 20, 20, 550, 100, state->apps[1].description.c_str());
-	CreateButton(state->hWnd, 200, 140, 200, 30, L"������������ ����������", 202);
-	CreateButton(state->hWnd, 20, 140, 100, 30, L"�������", 104);
-	CreateButton(state->hWnd, 470, 140, 100, 30, L"���������", 105);
-}
-
-void ShowPage4(AppState* state) {
-	state->currentPage = 4;
-	ClearWindow(state->hWnd);
-
-	CreateStaticText(state->hWnd, 20, 20, 550, 50, L"���� ��������� ��������� ����������...");
-	state->hProgress = CreateProgressBar(state->hWnd, 20, 140, 550, 30);
-	SendMessage(state->hProgress, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
-	SendMessage(state->hProgress, PBM_SETSTEP, 10, 0);
-
-	CreateThread(NULL, 0, [](LPVOID lpParam) -> DWORD {
-		AppState* state = (AppState*)lpParam;
-		int totalSteps = 0;
-		int completedSteps = 0;
-
-		for (const auto& app : state->apps) {
-			if (app.accepted && !app.installed) {
-				totalSteps += 2;
-			}
-		}
-
-		if (totalSteps == 0) {
-			PostMessage(state->hWnd, WM_USER + 1, 0, 0);
-			return 0;
-		}
-
-		int stepSize = totalSteps > 0 ? 100 / totalSteps : 1;
-
-		for (auto& app : state->apps) {
-			if (app.accepted && !app.installed) {
-				std::wstring tempPath = state->downloadsPath + L"\\" + app.name + L"_installer.exe";
-				SendMessage(state->hProgress, PBM_SETPOS, completedSteps * stepSize, 0);
-
-				if (DownloadFile(app.downloadUrl, tempPath) == S_OK) {
-					completedSteps++;
-					SendMessage(state->hProgress, PBM_SETPOS, completedSteps * stepSize, 0);
-
-					if (InstallApp(tempPath, app.installArgs)) {
-						completedSteps++;
-						SendMessage(state->hProgress, PBM_SETPOS, completedSteps * stepSize, 0);
-						app.installed = IsAppInstalled(app.registryKey);
-						if (app.installed) {
-							completedSteps++;
-							SendMessage(state->hProgress, PBM_SETPOS, completedSteps * stepSize, 0);
-						}
-					}
-				}
-
-				DeleteFile(tempPath.c_str());
-			}
-		}
-
-		PostMessage(state->hWnd, WM_USER + 1, 0, 0);
-		return 0;
-		}, state, 0, NULL);
-}
-
-void ShowPage5(AppState* state) {
-	state->currentPage = 5;
-	ClearWindow(state->hWnd);
-
-	std::wstring resultText = L"���������� ���������:\n\n";
-
-	for (auto& app : state->apps) {
-		Sleep(800);
-		bool isInstalledNow = IsAppInstalled(app.registryKey);
-
-		resultText += app.name + L": ";
-		if (app.accepted) {
-			if (isInstalledNow) {
-				resultText += L"���������� ������� �����������.\n";
-				app.installed = true;
-			}
-			else {
-				resultText += L"�� ������� ����������.\n";
-			}
-		}
-		else if (app.installed) {
-			resultText += L"���������� ����������. ��������� �� ���������.\n";
-		}
-		else {
-			resultText += L"��������� ��������.\n";
-		}
-	}
-
-	CreateStaticText(state->hWnd, 20, 20, 550, 100, resultText.c_str());
-	CreateButton(state->hWnd, 20, 140, 550, 30, L"�����", 106);
-}
-
-std::wstring GetDownloadsPath() {
-	PWSTR path;
-	if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Downloads, 0, NULL, &path))) {
-		std::wstring downloadsPath(path);
-		CoTaskMemFree(path);
-		return downloadsPath;
-	}
-	return L"C:\\Users\\Public\\Downloads";
-}
-
-
-LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
-	AppState* state = (AppState*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
-
-	switch (message) {
-	case WM_CREATE: {
-		CREATESTRUCT* create = (CREATESTRUCT*)lParam;
-		state = (AppState*)create->lpCreateParams;
-		SetWindowLongPtr(hWnd, GWLP_USERDATA, (LONG_PTR)state);
-		state->hWnd = hWnd;
-		break;
-	}
-	case WM_COMMAND: {
-		int wmId = LOWORD(wParam);
-
-		if (wmId >= 201 && wmId <= 202) {
-			int appIndex = wmId - 201;
-			ShellExecute(NULL, L"open", state->apps[appIndex].licenseUrl.c_str(), NULL, NULL, SW_SHOW);
-		}
-		else {
-			switch (wmId) {
-			case 101: ShowPage2(state); break;
-			case 102: state->apps[0].accepted = true; ShowPage3(state); break;
-			case 103: state->apps[0].accepted = false; ShowPage3(state); break;
-			case 104: state->apps[1].accepted = true; ShowPage4(state); break;
-			case 105: state->apps[1].accepted = false; ShowPage4(state); break;
-			case 106: PostQuitMessage(0); break;
-			}
-		}
-		break;
-	}
-	case WM_USER + 1:
-		ShowPage5(state);
-		break;
-	case WM_DESTROY:
-		PostQuitMessage(0);
-		break;
-	default:
-		return DefWindowProc(hWnd, message, wParam, lParam);
-	}
-	return 0;
+std::vector<AppManager> createAppList(const std::wstring& downloadsPath) {
+    return {
+        AppManager(
+            L"7-Zip",
+            L"7-Zip - архиватор файлов с высокой степенью сжатия.\n"
+            L"Поддерживает множество форматов архивов и файловых систем.",
+            L"https://www.7-zip.org/license.txt",
+            L"https://www.7-zip.org/a/7z2501.exe",
+            L"/S",
+            L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\7-Zip"
+        ),
+        AppManager(
+            L"XnView MP",
+            L"XnView MP - мощный просмотрщик и конвертер изображений.\n"
+            L"Поддерживает более 500 форматов изображений.",
+            L"https://www.xnview.com/license.html",
+            L"https://download.xnview.com/XnViewMP-win.exe",
+            L"/VERYSILENT",
+            L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\XnViewMP_is1"
+        )
+        // Новые приложения можно легко добавить здесь
+    };
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
-	AppState state = { 0 };
-	state.silentMode = (strstr(lpCmdLine, "/S") || strstr(lpCmdLine, "/verysilent"));
-	state.downloadsPath = GetDownloadsPath();
+    // Проверяем аргументы командной строки
+    bool silentMode = (strstr(lpCmdLine, "/S") != nullptr ||
+        strstr(lpCmdLine, "/verysilent") != nullptr ||
+        strstr(lpCmdLine, "/silent") != nullptr);
 
-	HICON hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1));
+    // Получаем путь к папке загрузок
+    std::wstring downloadsPath = getDownloadsPath();
 
-	state.apps = {
-		{
-			L"7-Zip",
-			L"7-Zip - ��� ��������� ������ � ������� �������� ������.\n"
-			L"������������ ��������� ��������: 7z, ZIP, RAR, GZIP, TAR, ZIP, WIM.\n"
-			L"���������� ������ ��� ��������� ��������: APFS, AR, ARJ,\n"
-			L"CAB, CHM, CPIO, CramFS, DMG, EXT, FAT, GPT, HFS, IHEX,\n"
-			L"ISO, LZH, LZMA, MBR, MSI, NSIS, NTFS, QCOW2, RAR, RPM,\n"
-			L"SquashFS, UDF, UEFI, VDI, VHD, VHDX, VMDK, XAR � Z.",
-			L"https://www.7-zip.org/license.txt",
-			L"https://www.7-zip.org/a/7z2501.exe",
-			L"/S /D=" + state.downloadsPath + L"\\7-Zip",
-			L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\7-Zip",
-			false,
-			IsAppInstalled(L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\7-Zip")
-		},
-		{
-			L"XnView MP",
-			L"XnView MP - ��� ������ ����������� � ��������� �����������.\n"
-			L"������������ ����� 500 �������� ����������� � ����� ��������� ������� ��������������.",
-			L"https://www.xnview.com/wiki/index.php?title=XnView_User_Guide",
-			L"https://download.xnview.com/XnViewMP-win.exe",
-			L"/verysilent /DIR=" + state.downloadsPath + L"\\XnView",
-			L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\XnViewMP_is1",
-			false,
-			IsAppInstalled(L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\XnViewMP_is1")
-		}
-	};
+    // Создаем список приложений
+    std::vector<AppManager> apps = createAppList(downloadsPath);
 
-	if (state.silentMode) {
-		for (auto& app : state.apps) {
-			if (!app.installed) {
-				std::wstring tempPath = state.downloadsPath + L"\\" + app.name + L"_installer.exe";
-				if (DownloadFile(app.downloadUrl, tempPath) == S_OK) {
-					InstallApp(tempPath, app.installArgs);
-					DeleteFile(tempPath.c_str());
-				}
-			}
-		}
-		return 0;
-	}
+    // Если режим тихой установки
+    if (silentMode) {
+        for (auto& app : apps) {
+            if (!app.isInstalled()) {
+                app.install(downloadsPath);
+            }
+        }
+        return 0;
+    }
 
-	WNDCLASSEX wc = { sizeof(WNDCLASSEX) };
-	wc.style = CS_CLASSDC;
-	wc.lpfnWndProc = WndProc;
-	wc.hInstance = hInstance;
-	wc.hIcon = hIcon;
-	wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-	wc.lpszClassName = L"InstallerClass";
-	wc.hIconSm = hIcon;
+    // Создаем UI и запускаем приложение
+    InstallerUI installer(hInstance, apps, downloadsPath, silentMode);
 
-	RegisterClassEx(&wc);
+    if (!installer.getWindowHandle()) {
+        return 1;
+    }
 
-	HWND hWnd = CreateWindow(wc.lpszClassName, L"���������� ����������",
-		WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX,
-		CW_USEDEFAULT, CW_USEDEFAULT, 600, 220,
-		NULL, NULL, hInstance, &state);
+    // Показываем стартовую страницу
+    installer.showWelcomePage();
 
-	if (!hWnd) {
-		return 0;
-	}
+    // Запускаем цикл сообщений
+    MSG msg;
+    while (GetMessage(&msg, NULL, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
 
-	SendMessage(hWnd, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
-	SendMessage(hWnd, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
-
-	ShowWindow(hWnd, nCmdShow);
-	UpdateWindow(hWnd);
-	ShowPage1(&state);
-
-	MSG msg;
-	while (GetMessage(&msg, NULL, 0, 0)) {
-		TranslateMessage(&msg);
-		DispatchMessage(&msg);
-	}
-
-	return (int)msg.wParam;
+    return (int)msg.wParam;
 }
